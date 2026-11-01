@@ -1,0 +1,61 @@
+name: Build SA TUNNEL APK
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "SATunnel/**"
+      - ".github/workflows/android.yml"
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout SA TUNNEL
+        uses: actions/checkout@v4
+      - name: Checkout official XTLS libXray
+        uses: actions/checkout@v4
+        with:
+          repository: XTLS/libXray
+          ref: v26.10.31
+          path: libXray
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+      - name: Set up Android SDK and NDK
+        uses: android-actions/setup-android@v3
+      - name: Install Android toolchain
+        run: |
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager "platforms;android-35" "ndk;27.2.12479018"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+      - name: Build official libXray AAR
+        working-directory: libXray
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          gomobile init
+          python3 build/main.py android
+      - name: Stage native engine
+        run: |
+          mkdir -p SATunnel/app/libs
+          cp libXray/libXray.aar SATunnel/app/libs/libXray.aar
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+      - name: Build debug APK
+        working-directory: SATunnel
+        run: gradle --no-daemon :app:assembleDebug
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: SA-TUNNEL-debug-apk
+          path: SATunnel/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
