@@ -1,50 +1,84 @@
 
-      - name: Locate Android SDK and accept licenses
+name: Build SA TUNNEL APK
+
+"on":
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache: false
+
+      - name: Accept Android SDK licenses
         shell: bash
         run: |
           set -euo pipefail
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT}}"
+          MANAGER="$(find "$SDK/cmdline-tools" -name sdkmanager -type f | sort -V | tail -n 1)"
+          test -n "$MANAGER"
 
-          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
-          SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort -V | tail -n 1)"
-
-          if [ -z "$SDKMANAGER" ]; then
-            echo "ERROR: sdkmanager not found"
-            exit 1
-          fi
-
-          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
-          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
-          echo "$(dirname "$SDKMANAGER")" >> "$GITHUB_PATH"
-
-          python3 - "$SDKMANAGER" "$SDK_ROOT" <<'PY'
+          python3 - "$MANAGER" "$SDK" <<'PY'
           import subprocess
           import sys
 
-          sdkmanager, sdk_root = sys.argv[1], sys.argv[2]
-
           result = subprocess.run(
-              [sdkmanager, f"--sdk_root={sdk_root}", "--licenses"],
+              [sys.argv[1], "--sdk_root=" + sys.argv[2], "--licenses"],
               input="y\n" * 100,
               text=True,
               stdout=subprocess.PIPE,
               stderr=subprocess.STDOUT,
               timeout=600
           )
-
           print(result.stdout)
           sys.exit(result.returncode)
           PY
 
-      - name: Install Android build packages
-        shell: bash
+      - name: Install Android SDK packages
         run: |
           set -euo pipefail
-
-          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | sort -V | tail -n 1)"
-
-          "$SDKMANAGER" --sdk_root="$ANDROID_HOME" \
+          SDK="$ANDROID_HOME"
+          MANAGER="$(find "$SDK/cmdline-tools" -name sdkmanager -type f | sort -V | tail -n 1)"
+          "$MANAGER" --sdk_root="$SDK" \
             "platform-tools" \
             "platforms;android-35" \
             "ndk;27.2.12479018"
 
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+      - name: Check project
+        run: |
+          test -d SATunnel
+          test -f SATunnel/app/build.gradle.kts
+          echo "Project files found"
+
+      - name: Build APK
+        run: |
+          cd SATunnel
+          gradle --no-daemon :app:assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: SA-TUNNEL-debug-apk
+          path: SATunnel/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
