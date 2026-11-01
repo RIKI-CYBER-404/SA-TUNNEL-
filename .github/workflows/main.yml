@@ -1,61 +1,119 @@
 name: Build SA TUNNEL APK
+
 on:
   workflow_dispatch:
   push:
     paths:
-      - "SATunnel/**"
-      - ".github/workflows/android.yml"
+      - 'SATunnel/**'
+      - '.github/workflows/android.yml'
+
 permissions:
   contents: read
+
 jobs:
   build:
     runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
     steps:
       - name: Checkout SA TUNNEL
         uses: actions/checkout@v4
+
       - name: Checkout official XTLS libXray
         uses: actions/checkout@v4
         with:
           repository: XTLS/libXray
           ref: v26.10.31
           path: libXray
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: '17'
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.25.x"
-      - name: Set up Android SDK and NDK
-        uses: android-actions/setup-android@v3
-        with:
-          accept-android-sdk-licenses: true
-      - name: Accept SDK licenses and install Android toolchain
+          go-version: '1.25.x'
+          cache: false
+
+      - name: Locate Android SDK and accept licenses
+        shell: bash
         run: |
-          set -euo pipefail
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platforms;android-35" "ndk;27.2.12479018"
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          set -e
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+
+          if [ ! -d "$SDK_ROOT" ]; then
+            echo "Android SDK directory not found: $SDK_ROOT"
+            exit 1
+          fi
+
+          SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager 2>/dev/null | sort -V | tail -n 1)"
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "sdkmanager not found"
+            exit 1
+          fi
+
+          echo "Using sdkmanager: $SDKMANAGER"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$SDK_ROOT/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          echo "$(dirname "$SDKMANAGER")" >> "$GITHUB_PATH"
+          echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+
+          yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses
+
+      - name: Install Android build packages
+        shell: bash
+        run: |
+          set -e
+          SDK_ROOT="$ANDROID_HOME"
+          SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager 2>/dev/null | sort -V | tail -n 1)"
+
+          yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses
+
+          "$SDKMANAGER" --sdk_root="$SDK_ROOT" \
+            "platform-tools" \
+            "platforms;android-35" \
+            "ndk;27.2.12479018"
+
+      - name: Verify Android SDK packages
+        run: |
+          set -e
+          test -d "$ANDROID_HOME/platforms/android-35"
+          test -d "$ANDROID_HOME/ndk/27.2.12479018"
+          test -x "$ANDROID_HOME/platform-tools/adb"
+          echo "Android SDK installation verified"
+
       - name: Build official libXray AAR
         working-directory: libXray
+        shell: bash
         run: |
+          set -e
           go install golang.org/x/mobile/cmd/gomobile@latest
+          export PATH="$(go env GOPATH)/bin:$PATH"
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
           gomobile init
           python3 build/main.py android
+
       - name: Stage native engine
         run: |
+          set -e
           mkdir -p SATunnel/app/libs
+          test -f libXray/libXray.aar
           cp libXray/libXray.aar SATunnel/app/libs/libXray.aar
+
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: "8.9"
+          gradle-version: '8.9'
+
       - name: Build debug APK
         working-directory: SATunnel
         run: gradle --no-daemon :app:assembleDebug
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
