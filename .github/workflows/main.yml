@@ -1,21 +1,15 @@
 name: Build SA TUNNEL APK
 
-"on":
+on:
   workflow_dispatch:
   push:
-    branches:
-      - main
-      - master
-    paths:
-      - '**'
-      - '.github/workflows/main.yml'
-      - '.github/workflows/android.yml'
+    branches: [main, master]
 
 permissions:
   contents: read
 
 concurrency:
-  group: sa-tunnel-apk-${{ github.ref }}
+  group: sa-tunnel-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -28,25 +22,51 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Locate Android project
+      - name: Find or extract Android project ZIP
         id: project
         shell: bash
         run: |
           set -euo pipefail
-          PROJECT_DIR="$(find . -type f -path '*/app/build.gradle.kts' -print -quit | sed 's|/app/build.gradle.kts$||')"
-          if [ -z "$PROJECT_DIR" ]; then
-            PROJECT_DIR="$(find . -type f -path '*/app/build.gradle' -print -quit | sed 's|/app/build.gradle$||')"
+
+          # First check whether the Android project is already in the repository.
+          APP_GRADLE="$(find . -type f \( -path '*/app/build.gradle.kts' -o -path '*/app/build.gradle' \) -not -path './.git/*' -print -quit)"
+
+          # If it is not present, extract the ZIP uploaded to the repository root.
+          if [ -z "$APP_GRADLE" ]; then
+            ZIP_FILE="$(find . -maxdepth 3 -type f -iname 'SA-TUNNEL-FIXED.zip' -print -quit)"
+            if [ -z "$ZIP_FILE" ]; then
+              ZIP_FILE="$(find . -maxdepth 3 -type f -iname '*.zip' -not -path './.git/*' -print -quit)"
+            fi
+            if [ -z "$ZIP_FILE" ]; then
+              echo 'ERROR: No Android project and no project ZIP found.'
+              echo 'Upload the SA-TUNNEL-FIXED.zip file to the repository root.'
+              exit 1
+            fi
+            echo "Extracting: $ZIP_FILE"
+            mkdir -p "$GITHUB_WORKSPACE/_extracted"
+            unzip -oq "$ZIP_FILE" -d "$GITHUB_WORKSPACE/_extracted"
+            APP_GRADLE="$(find "$GITHUB_WORKSPACE/_extracted" -type f \( -path '*/app/build.gradle.kts' -o -path '*/app/build.gradle' \) -print -quit)"
           fi
-          if [ -z "$PROJECT_DIR" ] || [ ! -f "$PROJECT_DIR/settings.gradle.kts" -a ! -f "$PROJECT_DIR/settings.gradle" ]; then
+
+          if [ -z "$APP_GRADLE" ]; then
             echo 'ERROR: Android Gradle project not found.'
-            echo 'Expected a folder containing settings.gradle(.kts) and app/build.gradle(.kts).'
-            echo 'Repository files (first 250):'
-            find . -maxdepth 5 -type f | sort | head -250
+            echo 'Expected app/build.gradle.kts or app/build.gradle inside the ZIP.'
+            find "$GITHUB_WORKSPACE" -maxdepth 6 -type f | head -200
             exit 1
           fi
-          PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
+
+          PROJECT_DIR="$(dirname "$(dirname "$APP_GRADLE")")"
+          if [ ! -f "$PROJECT_DIR/settings.gradle.kts" ] && [ ! -f "$PROJECT_DIR/settings.gradle" ]; then
+            echo "ERROR: settings.gradle(.kts) missing in $PROJECT_DIR"
+            exit 1
+          fi
+          if [ ! -f "$PROJECT_DIR/build_core.sh" ]; then
+            echo "ERROR: build_core.sh missing in $PROJECT_DIR"
+            exit 1
+          fi
+
           echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
-          echo "Found Android project: $PROJECT_DIR"
+          echo "Android project found: $PROJECT_DIR"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -62,29 +82,18 @@ jobs:
 
       - name: Accept Android SDK licenses
         shell: bash
-        env:
-          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
-          ANDROID_HOME: ${{ env.ANDROID_HOME }}
         run: |
           set -euo pipefail
           SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
-          if [ ! -d "$SDK_ROOT" ]; then
-            echo "ERROR: Android SDK directory not found: $SDK_ROOT"
-            exit 1
-          fi
           SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager 2>/dev/null | sort -V | tail -n 1)"
           if [ -z "$SDKMANAGER" ]; then
-            echo 'ERROR: sdkmanager was not found under cmdline-tools.'
-            find "$SDK_ROOT" -maxdepth 4 -type f -name sdkmanager -print || true
+            echo "ERROR: sdkmanager not found under $SDK_ROOT/cmdline-tools"
             exit 1
           fi
           echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
           echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
           echo "$(dirname "$SDKMANAGER")" >> "$GITHUB_PATH"
-          echo "Using: $SDKMANAGER"
-          # Feed stdin from Python rather than `yes | sdkmanager`; the latter
-          # can exit with SIGPIPE/Broken pipe after sdkmanager finishes early.
           python3 - "$SDKMANAGER" "$SDK_ROOT" <<'PY'
           import subprocess
           import sys
@@ -98,8 +107,7 @@ jobs:
               timeout=600,
           )
           print(result.stdout)
-          if result.returncode != 0:
-              raise SystemExit(result.returncode)
+          sys.exit(result.returncode)
           PY
 
       - name: Install Android SDK packages
@@ -108,7 +116,6 @@ jobs:
           set -euo pipefail
           SDK_ROOT="$ANDROID_HOME"
           SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager 2>/dev/null | sort -V | tail -n 1)"
-          test -n "$SDKMANAGER"
           "$SDKMANAGER" --sdk_root="$SDK_ROOT" \
             'platform-tools' \
             'platforms;android-35' \
@@ -124,25 +131,21 @@ jobs:
           test -d "$ANDROID_HOME/platforms/android-35"
           test -d "$ANDROID_HOME/build-tools/35.0.0"
           test -d "$ANDROID_HOME/ndk/27.2.12479018"
-          test -x "$ANDROID_HOME/platform-tools/adb"
           java -version
           go version
-          echo 'Android SDK, build-tools and NDK are ready.'
+          echo 'Android SDK, build tools and NDK are ready.'
 
       - name: Build official libXray AAR
-        shell: bash
         env:
           PROJECT_DIR: ${{ steps.project.outputs.project_dir }}
+        shell: bash
         run: |
           set -euo pipefail
-          if [ ! -f "$PROJECT_DIR/build_core.sh" ]; then
-            echo "ERROR: $PROJECT_DIR/build_core.sh is missing. Cannot build the Xray AAR required by this project."
-            exit 1
-          fi
-          chmod +x "$PROJECT_DIR/build_core.sh"
-          bash "$PROJECT_DIR/build_core.sh"
-          test -s "$PROJECT_DIR/app/libs/libXray.aar"
-          echo 'libXray.aar built successfully.'
+          cd "$PROJECT_DIR"
+          chmod +x ./build_core.sh
+          ./build_core.sh
+          test -s app/libs/libXray.aar
+          echo 'libXray.aar created successfully.'
 
       - name: Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
@@ -150,9 +153,9 @@ jobs:
           gradle-version: '8.9'
 
       - name: Build debug APK
-        shell: bash
         env:
           PROJECT_DIR: ${{ steps.project.outputs.project_dir }}
+        shell: bash
         run: |
           set -euo pipefail
           cd "$PROJECT_DIR"
